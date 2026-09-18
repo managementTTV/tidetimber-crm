@@ -361,18 +361,6 @@
   .dl-merge-tags code { background: var(--off-bg); padding: 1px 5px; border-radius: 2px; }
 
   /* --- Login gate --- */
-  #dl-auth-overlay { position: fixed; inset: 0; background: var(--paper); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 24px; }
-  .dl-auth-card { background: var(--paper-raised); border: 1px solid var(--ink); border-radius: var(--radius); width: 100%; max-width: 360px; padding: 30px 28px; }
-  .dl-auth-card .eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--brass-dark); margin-bottom: 6px; }
-  .dl-auth-card h1 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 26px; margin: 0 0 18px; }
-  .dl-auth-card label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-soft); margin-bottom: 4px; }
-  .dl-auth-card input { width: 100%; font-family: 'Inter', sans-serif; font-size: 14px; padding: 10px 11px; border: 1px solid var(--line-strong); background: #fff; border-radius: var(--radius); color: var(--ink); margin-bottom: 13px; }
-  .dl-auth-btn { width: 100%; font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; padding: 11px; background: var(--ink); color: var(--paper); border: none; border-radius: var(--radius); cursor: pointer; letter-spacing: 0.02em; }
-  .dl-auth-btn:hover { background: var(--brass-dark); }
-  .dl-auth-btn:disabled { opacity: 0.6; cursor: default; }
-  .dl-auth-error { color: var(--sold); font-size: 12.5px; margin-bottom: 12px; min-height: 16px; font-family: 'IBM Plex Mono', monospace; }
-  .dl-auth-signout { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-soft); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
-  .dl-auth-signout:hover { color: var(--ink); }
 
   /* --- Area read (verdict + reasons) --- */
   .dl-verdict-toggle { display: flex; gap: 8px; margin-bottom: 10px; }
@@ -410,21 +398,6 @@
 </head>
 <body>
 
-<div id="dl-auth-overlay">
-  <div class="dl-auth-card">
-    <div class="eyebrow">Deal Ledger</div>
-    <h1>Sign in</h1>
-    <div id="dl-auth-error" class="dl-auth-error"></div>
-    <form id="dl-auth-form">
-      <label for="dl-auth-email">Email</label>
-      <input type="email" id="dl-auth-email" autocomplete="username" required />
-      <label for="dl-auth-password">Password</label>
-      <input type="password" id="dl-auth-password" autocomplete="current-password" required />
-      <button type="submit" class="dl-auth-btn" id="dl-auth-submit">Sign in</button>
-    </form>
-  </div>
-</div>
-
 <div id="deal-root" style="display:none;">
   <div class="dl-wrap">
     <div class="dl-header">
@@ -432,7 +405,7 @@
         <div class="eyebrow">Deal Ledger</div>
         <h1>Lead Pipeline</h1>
       </div>
-      <div class="dl-team-note"><span class="dot"></span> <span id="dl-team-note-text">Shared with your team — everyone sees the same list</span> · <button id="dl-signout-btn" class="dl-auth-signout" type="button">Sign out</button></div>
+      <div class="dl-team-note"><span class="dot"></span> <span id="dl-team-note-text">Shared with your team — everyone sees the same list</span></div>
     </div>
 
     <div id="dl-fu-section" class="dl-fu-section"></div>
@@ -1266,12 +1239,16 @@
     return src.prefix + '-' + stamp;
   }
 
+  let loadFailed = false;
   async function loadLeads() {
     try {
       const result = await fetchAllLeads();
       leads = result || [];
+      loadFailed = false;
     } catch (e) {
+      console.error('fetchAllLeads failed', e);
       leads = [];
+      loadFailed = true;
     }
     leads = (leads || []).map(l => {
       const x = {
@@ -2699,72 +2676,40 @@
   sortEl.addEventListener('change', render);
 
   // ============================================================
-  //  Auth gate — nobody sees the pipeline without signing in.
-  //  Team accounts are created invite-only from the Supabase
-  //  dashboard; this page only ever signs people IN, never signs
-  //  them up, so no one can self-register.
+  //  Access — the email/password sign-in gate was removed 2026-09-17
+  //  (team decision): the ledger opens directly for anyone with the
+  //  link. What the page can read and write is now exactly what the
+  //  Supabase row-level-security policies grant the anon/publishable
+  //  key. If those policies still require an authenticated user, the
+  //  list loads empty and the note below says so.
   // ============================================================
-  const authOverlay = document.getElementById('dl-auth-overlay');
-  const authForm = document.getElementById('dl-auth-form');
-  const authError = document.getElementById('dl-auth-error');
-  const authSubmit = document.getElementById('dl-auth-submit');
-  const signoutBtn = document.getElementById('dl-signout-btn');
   let appStarted = false;
 
-  async function startApp(session) {
-    authOverlay.style.display = 'none';
+  async function startApp() {
     root.style.display = 'block';
-    const noteEl = document.getElementById('dl-team-note-text');
-    if (noteEl && session && session.user) {
-      noteEl.textContent = 'Signed in as ' + session.user.email + ' — shared team list';
-    }
     if (appStarted) return;
     appStarted = true;
-    await loadTemplates();
-    await loadLeads();
-  }
-
-  function showLogin() {
-    root.style.display = 'none';
-    authOverlay.style.display = 'flex';
-  }
-
-  authForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    authError.textContent = '';
-    authSubmit.disabled = true;
-    authSubmit.textContent = 'Signing in…';
-    const email = document.getElementById('dl-auth-email').value.trim();
-    const password = document.getElementById('dl-auth-password').value;
-    const { data, error } = await sb.auth.signInWithPassword({ email, password });
-    authSubmit.disabled = false;
-    authSubmit.textContent = 'Sign in';
-    if (error) {
-      authError.textContent = /invalid login/i.test(error.message || '')
-        ? 'Wrong email or password.'
-        : (error.message || 'Sign in failed');
-      return;
+    const noteEl = document.getElementById('dl-team-note-text');
+    try {
+      await loadTemplates();
+      await loadLeads();
+    } catch (e) {
+      console.error('startApp failed', e);
     }
-    startApp(data.session);
-  });
-
-  if (signoutBtn) {
-    signoutBtn.addEventListener('click', async () => {
-      await sb.auth.signOut();
-      location.reload();
-    });
+    // Supabase RLS does not error on a forbidden read — it returns zero rows. The team
+    // list has never been empty, so an empty result almost certainly means the anon
+    // policies are not in place yet; say so instead of showing an empty pipeline.
+    if (noteEl && (loadFailed || !leads.length)) {
+      noteEl.textContent = loadFailed
+        ? 'Could not load the shared list — the database refused the request. Ask Brian to update the Supabase policies.'
+        : 'No leads came back — if the team list is missing, the database is still refusing anonymous access. Ask Brian to update the Supabase policies.';
+    }
   }
 
   // Load Google Maps (for geocoding) if a key is configured — safe no-op otherwise.
   initMaps();
 
-  (async () => {
-    try {
-      const { data } = await sb.auth.getSession();
-      if (data && data.session) { startApp(data.session); return; }
-    } catch (e) { /* fall through to login */ }
-    showLogin();
-  })();
+  startApp();
 })();
 </script>
 </body>
