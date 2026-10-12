@@ -96,6 +96,31 @@
 
   .dl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 
+  /* --- Board (Kanban) view: one column per status, in STATUSES order --- */
+  #deal-root.view-board .dl-wrap { max-width: 1680px; }
+  .dl-toolbar .dl-map-seg button { font-size: 12px; padding: 8px 11px; }
+  .dl-board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; }
+  .dl-col {
+    flex: 0 0 280px; display: flex; flex-direction: column; max-height: 78vh;
+    background: var(--paper); border: 1px solid var(--line); border-top: 3px solid var(--off);
+    border-radius: var(--radius); transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .dl-col-head {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid var(--line);
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink);
+  }
+  .dl-col-head .n { color: var(--ink-soft); font-weight: 500; }
+  .dl-col-body { display: flex; flex-direction: column; gap: 10px; padding: 10px; overflow-y: auto; min-height: 90px; }
+  .dl-col-empty { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-soft); text-align: center; padding: 18px 0; }
+  .dl-col.drop-ok { border-color: var(--brass); background: var(--pending-bg); }
+  .dl-board .dl-card { padding: 12px; }
+  .dl-board .dl-card .addr { font-size: 15px; }
+  .dl-board .dl-card .row { flex-wrap: wrap; gap: 2px 10px; }
+  .dl-board .dl-stamp { display: none; } /* the column already says the status */
+  .dl-card.dragging { opacity: 0.45; }
+
   .dl-card {
     background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius);
     padding: 16px; position: relative; cursor: pointer;
@@ -430,6 +455,10 @@
         <option value="date-asc">Oldest first</option>
         <option value="followup-asc">Follow-up date</option>
       </select>
+      <div class="dl-map-seg" id="dl-view-toggle">
+        <button type="button" data-view="board" title="Kanban board: one column per status. Drag a card to change its status.">Board</button>
+        <button type="button" data-view="grid" title="All leads as one grid of cards">Grid</button>
+      </div>
       <button class="dl-select" id="dl-templates-btn" style="cursor:pointer;">✎ Manage Templates</button>
       <button class="dl-select" id="dl-export-btn" style="cursor:pointer;">⬇ Export CSV</button>
       <button class="dl-select" id="dl-dashboard-btn" style="cursor:pointer;">📊 Dashboard</button>
@@ -539,6 +568,13 @@
   let leads = [];
   let loaded = false;
 
+  // Board (Kanban) or grid. Board is the default (Pat, Oct 2026); the choice
+  // is remembered per browser.
+  const VIEW_KEY = 'dl-view';
+  let viewMode = 'board';
+  try { if (localStorage.getItem(VIEW_KEY) === 'grid') viewMode = 'grid'; } catch (e) { /* storage blocked: stay on board */ }
+  let boardDragId = null;
+
   const SOURCES = [
     { value: 'Wholesaler', prefix: 'WS' },
     { value: 'Wholesalers', prefix: 'WS' },
@@ -550,15 +586,17 @@
     { value: 'Other', prefix: 'OT' },
   ];
 
+  // Pat's order (Oct 2026). Drives the status dropdowns, the map legend and
+  // the board columns, so they all read the same left-to-right / top-to-bottom.
   const STATUSES = [
     'New / Untouched',
     'For Underwriting',
+    'Escalated – Awaiting Supervisor Review',
     'Offer Sent',
     'Active Follow-Up',
-    'Escalated – Awaiting Supervisor Review',
     'Qualified',
-    'Off-Market',
     'Rejected',
+    'Off-Market',
     'Ghosted',
     'Dead',
     'Pass',
@@ -569,6 +607,12 @@
   // still use the full SOURCES/STATUSES lists, so legacy values stay searchable.
   const ACTIVE_SOURCES = ['Wholesaler', 'Inbound', 'Outbound'];               // #1: drop Wholesalers dup + Off-Market/Land/Teardown/Other
   const ACTIVE_STATUSES = STATUSES.filter(s => s !== 'For Underwriting');     // #9: drop "For Underwriting"
+
+  // Sort comparator for status names; anything not in STATUSES goes last.
+  function byStatusOrder(a, b) {
+    const ia = STATUSES.indexOf(a), ib = STATUSES.indexOf(b);
+    return (ia < 0 ? STATUSES.length : ia) - (ib < 0 ? STATUSES.length : ib);
+  }
 
   // Build <option>s from an active list. If the record already holds a retired
   // value, keep it in the list (still selected) so editing never silently
@@ -1346,10 +1390,91 @@
       return;
     }
 
-    contentEl.innerHTML = `<div class="dl-grid">${list.map(cardHtml).join('')}</div>`;
+    if (viewMode === 'board') renderBoard(list);
+    else contentEl.innerHTML = `<div class="dl-grid">${list.map(cardHtml).join('')}</div>`;
     contentEl.querySelectorAll('.dl-card').forEach(card => {
       card.addEventListener('click', () => openDetail(card.dataset.id));
     });
+  }
+
+  // --- Board (Kanban) view ---------------------------------------------------
+  // Same filtered + sorted list as the grid, split into one column per status
+  // in STATUSES order. Every active status always gets a column, so there is
+  // somewhere to drop a card; a retired status (For Underwriting) only shows
+  // up while a lead still holds it, and takes no new drops.
+  function renderBoard(list) {
+    const byStatus = {};
+    list.forEach(l => { (byStatus[l.status] = byStatus[l.status] || []).push(l); });
+    const cols = ACTIVE_STATUSES
+      .concat(Object.keys(byStatus).filter(s => !ACTIVE_STATUSES.includes(s)))
+      .sort(byStatusOrder);
+
+    contentEl.innerHTML = `<div class="dl-board">${cols.map((s, i) => {
+      const items = byStatus[s] || [];
+      return `
+        <div class="dl-col" data-col="${i}" style="border-top-color:${STATUS_COLOR[s] || '#6B6459'};">
+          <div class="dl-col-head"><span>${escapeHtml(s)}</span><span class="n">${items.length}</span></div>
+          <div class="dl-col-body">${items.length ? items.map(cardHtml).join('') : '<div class="dl-col-empty">No leads</div>'}</div>
+        </div>`;
+    }).join('')}</div>`;
+
+    const board = contentEl.querySelector('.dl-board');
+    board.querySelectorAll('.dl-card').forEach(card => {
+      card.draggable = true;
+      card.addEventListener('dragstart', (e) => {
+        boardDragId = card.dataset.id;
+        e.dataTransfer.effectAllowed = 'move';
+        // Custom type: Firefox needs data to start a drag, and text/plain would
+        // paste the id into the search box if the card were dropped there.
+        e.dataTransfer.setData('application/x-dl-lead', boardDragId);
+        card.classList.add('dragging');
+      });
+      card.addEventListener('dragend', () => {
+        boardDragId = null;
+        card.classList.remove('dragging');
+        board.querySelectorAll('.dl-col.drop-ok').forEach(c => c.classList.remove('drop-ok'));
+      });
+    });
+    board.querySelectorAll('.dl-col').forEach(col => {
+      const status = cols[Number(col.dataset.col)];
+      if (!ACTIVE_STATUSES.includes(status)) return;
+      col.addEventListener('dragover', (e) => {
+        if (!boardDragId) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        col.classList.add('drop-ok');
+      });
+      col.addEventListener('dragleave', (e) => {
+        if (!col.contains(e.relatedTarget)) col.classList.remove('drop-ok');
+      });
+      col.addEventListener('drop', (e) => {
+        e.preventDefault();
+        col.classList.remove('drop-ok');
+        const id = boardDragId;
+        boardDragId = null;
+        if (id) setLeadStatus(id, status);
+      });
+    });
+  }
+
+  // A card dropped on another column. Same save as the edit form: stamp the
+  // offer-sent date, run the shared status rules (follow-up track / date),
+  // then write the one lead.
+  async function setLeadStatus(id, status) {
+    const l = leads.find(x => x.id === id);
+    if (!l || l.status === status) return;
+    const prevStatus = l.status;
+    const prevDate = l.followUpDate || '';
+    l.status = status;
+    if (status === 'Offer Sent' && !l.offerSentDate) l.offerSentDate = new Date().toISOString().slice(0, 10);
+    applyStatusRules(l, prevStatus);
+    l.lastUpdated = new Date().toISOString().slice(0, 10);
+    render();
+    const ok = await upsertLead(l);
+    if (!ok) { toast('Sync failed — check your connection and try again'); return; }
+    const fu = l.followUpDate || '';
+    toast('Moved to ' + status + (fu === prevDate ? ''
+      : fu ? ' — next follow-up ' + fmtDate(fu) : ' — follow-up cleared'));
   }
 
   function cardHtml(l) {
@@ -2200,7 +2325,7 @@
         el.innerHTML = AREA_VERDICTS.map(v => `<span class="lg"><span class="dot" style="background:${v.color};"></span>${v.label}</span>`).join('')
           + `<span class="lg"><span class="dot" style="background:#B6AA90;"></span>No read</span>`;
       } else {
-        const present = [...new Set(visibleMapped().map(l => l.status))];
+        const present = [...new Set(visibleMapped().map(l => l.status))].sort(byStatusOrder);
         el.innerHTML = present.map(s => `<span class="lg"><span class="dot" style="background:${STATUS_COLOR[s] || '#6B6459'};"></span>${escapeHtml(s)}</span>`).join('');
       }
       if (mapHeatOn) el.innerHTML += `<span class="lg"><span class="dot" style="background:linear-gradient(90deg,#3F6B4F,#B8863B,#8B4A3D);"></span>Heatmap = caution density</span>`;
@@ -2668,6 +2793,21 @@
   catFilterEl.addEventListener('change', render);
   recordsFilterEl.addEventListener('change', render);
   sortEl.addEventListener('change', render);
+
+  const viewToggleEl = document.getElementById('dl-view-toggle');
+  function paintViewToggle() {
+    viewToggleEl.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.view === viewMode));
+    root.classList.toggle('view-board', viewMode === 'board');
+  }
+  viewToggleEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-view]');
+    if (!btn || btn.dataset.view === viewMode) return;
+    viewMode = btn.dataset.view;
+    try { localStorage.setItem(VIEW_KEY, viewMode); } catch (e2) { /* not remembered, still switches */ }
+    paintViewToggle();
+    render();
+  });
+  paintViewToggle();
 
   // ============================================================
   //  No login: the app opens straight to the shared team list.
