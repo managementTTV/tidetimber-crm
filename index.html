@@ -634,11 +634,21 @@
   const STATUS_ESCALATED = 'Escalated \u2013 Awaiting Supervisor Review';
   const STATUS_TO_TRACK = { 'Rejected': 'rejected', 'Ghosted': 'ghosted' };
 
-  function tomorrowIso() {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().slice(0, 10);
+  // "Today" is the Charlotte calendar date (America/New_York), not the UTC
+  // date: after ~8 pm Eastern the UTC date is already tomorrow, which made
+  // overdue / due-today / "last updated" land on the wrong day. All date-only
+  // fields (YYYY-MM-DD) are compared as strings, so this must be the same
+  // calendar the team works in.
+  const TZ = 'America/New_York';
+  const _etFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+  function todayIso() { return _etFmt.format(new Date()); }
+  // Calendar math on a YYYY-MM-DD string (UTC arithmetic, so no DST or
+  // browser-timezone drift).
+  function addDaysIso(iso, n) {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
   }
+  function tomorrowIso() { return addDaysIso(todayIso(), 1); }
 
   function statusRuleChanges(status, current) {
     const out = {};
@@ -895,9 +905,7 @@
     const track = TRACKS[trackKey];
     const idx = Math.min(Math.max(stage, 1), track.maxStage) - 1;
     const gap = track.gaps[idx] != null ? track.gaps[idx] : track.gaps[track.gaps.length - 1];
-    const base = fromISO ? new Date(fromISO + 'T00:00:00') : new Date();
-    base.setDate(base.getDate() + gap);
-    return base.toISOString().slice(0, 10);
+    return addDaysIso(fromISO || todayIso(), gap);
   }
 
   function fillMerge(str, l) {
@@ -959,7 +967,7 @@
     l.followUpTrack = tk;
     l.followUpStage = next;
     if (!atMax) l.followUpDate = computeNextDate(tk, next);
-    l.lastUpdated = new Date().toISOString().slice(0, 10);
+    l.lastUpdated = todayIso();
     render();
     const ok = await upsertLead(l);
     toast(atMax ? 'Already at final stage for this track' : `Marked done — now ${track.label} Day ${next}`);
@@ -972,7 +980,7 @@
     l.followUpTrack = trackKey;
     l.followUpStage = stage;
     l.followUpDate = computeNextDate(trackKey, stage);
-    l.lastUpdated = new Date().toISOString().slice(0, 10);
+    l.lastUpdated = todayIso();
     render();
     const ok = await upsertLead(l);
     toast(ok ? 'Follow-up stage updated' : 'Sync failed — check your connection and try again');
@@ -1146,7 +1154,7 @@
     const l = leads.find(x => x.id === id);
     if (!l) return;
     l.followUpDate = iso || '';
-    l.lastUpdated = new Date().toISOString().slice(0, 10);
+    l.lastUpdated = todayIso();
     render();
     const ok = await upsertLead(l);
     if (!ok) { toast('Sync failed \u2014 check your connection and try again'); return; }
@@ -1199,8 +1207,7 @@
   function genDealId(sourceVal) {
     const src = SOURCES.find(s => s.value === sourceVal) || SOURCES[SOURCES.length - 1];
     const now = new Date();
-    const stamp = now.getFullYear().toString().slice(2) +
-      String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0') +
+    const stamp = todayIso().replace(/-/g, '').slice(2) +
       String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + String(now.getSeconds()).padStart(2,'0');
     return src.prefix + '-' + stamp;
   }
@@ -1246,7 +1253,7 @@
     const untouched = pipe.filter(l => l.status === 'New / Untouched').length;
     const escalated = pipe.filter(l => l.status === 'Escalated – Awaiting Supervisor Review').length;
     const qualified = pipe.filter(l => l.status === 'Qualified').length;
-    const today = new Date().toISOString().slice(0,10);
+    const today = todayIso();
     const followupToday = pipe.filter(l => l.followUpDate && l.followUpDate <= today).length;
     const pastDue = pipe.filter(l => l.followUpDate && l.followUpDate < today).length; // #3: overdue = date strictly before today
 
@@ -1393,9 +1400,9 @@
     const prevStatus = l.status;
     const prevDate = l.followUpDate || '';
     l.status = status;
-    if (status === 'Offer Sent' && !l.offerSentDate) l.offerSentDate = new Date().toISOString().slice(0, 10);
+    if (status === 'Offer Sent' && !l.offerSentDate) l.offerSentDate = todayIso();
     applyStatusRules(l, prevStatus);
-    l.lastUpdated = new Date().toISOString().slice(0, 10);
+    l.lastUpdated = todayIso();
     render();
     const ok = await upsertLead(l);
     if (!ok) { toast('Sync failed — check your connection and try again'); return; }
@@ -1407,7 +1414,7 @@
   function cardHtml(l) {
     const flags = flagCount(l);
     // Past due = same rule as the Past Due tile, so the card and the count agree.
-    const late = l.followUpDate && l.followUpDate < new Date().toISOString().slice(0, 10);
+    const late = l.followUpDate && l.followUpDate < todayIso();
     return `
       <div class="dl-card" data-id="${l.id}">
         <div class="dl-topline">
@@ -1688,7 +1695,7 @@
       isNewDev: false, isFixFlip: false, contactName: '', contactEmail: '',
       arv: '', rehab: '', offer: '', followUpDate: '', notes: '',
       followUpTrack: 'followup', followUpStage: 1, offerType: 'WS Basic',
-      dateAdded: new Date().toISOString().slice(0,10), lastUpdated: new Date().toISOString().slice(0,10),
+      dateAdded: todayIso(), lastUpdated: todayIso(),
       dd: {}, lat: null, lng: null,
       areaVerdict: '', areaReasons: {},
       dealOutcome: '', dealReasons: {},
@@ -1922,10 +1929,10 @@
         followUpTrack: fuTrackEl.value,
         followUpStage: Number(fuStageEl.value),
         notes: document.getElementById('f-notes').value.trim(),
-        dateAdded: l.dateAdded || new Date().toISOString().slice(0,10),
-        lastUpdated: new Date().toISOString().slice(0,10),
+        dateAdded: l.dateAdded || todayIso(),
+        lastUpdated: todayIso(),
         offerSentDate: document.getElementById('f-status').value === 'Offer Sent'
-          ? (l.offerSentDate || new Date().toISOString().slice(0,10))
+          ? (l.offerSentDate || todayIso())
           : (l.offerSentDate || ''),
         addrKey: addrKey(document.getElementById('f-address').value.trim()),
         retiredAsDuplicateOf: l.retiredAsDuplicateOf || '',
@@ -2009,14 +2016,16 @@
     toast('Geocoded ' + done + (missed ? ' -- ' + missed + ' failed (see console)' : ''));
   }
 
-  function isoDate(d) { return d.toISOString().slice(0, 10); }
+  function dowOf(iso) { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)).getUTCDay(); }
+  function monthKeyShift(iso, back) {
+    const [y, m] = iso.split('-').map(Number);
+    const d = new Date(Date.UTC(y, m - 1 - back, 1));
+    return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0');
+  }
 
   // Monday-start week key, labeled by the week's start date
   function weekKeyOf(dateStr) {
-    const d = new Date(dateStr + 'T00:00:00');
-    const day = (d.getDay() + 6) % 7; // 0 = Monday
-    d.setDate(d.getDate() - day);
-    return isoDate(d);
+    return addDaysIso(dateStr, -((dowOf(dateStr) + 6) % 7)); // back to Monday
   }
   function monthKeyOf(dateStr) { return dateStr.slice(0, 7); } // YYYY-MM
 
@@ -2027,11 +2036,9 @@
   function countsByWeek(numWeeks) {
     const dates = offersSentDates();
     const buckets = [];
-    const today = new Date();
+    const today = todayIso();
     for (let i = numWeeks - 1; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i * 7);
-      const key = weekKeyOf(isoDate(d));
+      const key = weekKeyOf(addDaysIso(today, -i * 7));
       buckets.push({ key, count: 0 });
     }
     dates.forEach(ds => {
@@ -2045,10 +2052,9 @@
   function countsByMonth(numMonths) {
     const dates = offersSentDates();
     const buckets = [];
-    const today = new Date();
+    const today = todayIso();
     for (let i = numMonths - 1; i >= 0; i--) {
-      const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const key = monthKeyShift(today, i);
       buckets.push({ key, count: 0 });
     }
     dates.forEach(ds => {
@@ -2075,7 +2081,7 @@
     const out = [];
     const seen = new Set();
     for (let i = 0; i < numWeeks; i++) {
-      const key = weekKeyOf(isoDate(shiftDate(new Date(), -i * 7)));
+      const key = weekKeyOf(addDaysIso(todayIso(), -i * 7));
       if (!seen.has(key)) { seen.add(key); out.push(key); }
     }
     return out;
@@ -2090,11 +2096,8 @@
 
   function buildMonthOptions(numMonths) {
     const out = [];
-    const today = new Date();
-    for (let i = 0; i < numMonths; i++) {
-      const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
-      out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-    }
+    const today = todayIso();
+    for (let i = 0; i < numMonths; i++) out.push(monthKeyShift(today, i));
     return out;
   }
 
@@ -2297,12 +2300,11 @@
   }
 
   function openDashboardModal() {
-    const today = isoDate(new Date());
+    const today = todayIso();
     const thisWeekKey = weekKeyOf(today);
     const thisMonthKey = monthKeyOf(today);
-    const lastWeekKey = weekKeyOf(isoDate(shiftDate(new Date(), -7)));
-    const lastMonthDate = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1);
-    const lastMonthKey = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, '0')}`;
+    const lastWeekKey = weekKeyOf(addDaysIso(today, -7));
+    const lastMonthKey = monthKeyShift(today, 1);
     const dates = offersSentDates();
 
     const todayCount = dates.filter(d => d === today).length;
@@ -2416,7 +2418,7 @@
     return AREA_REASONS.filter(r => l.areaReasons && l.areaReasons[r.key]).map(r => r.label).join('; ');
   }
   function mapExportName(ext) {
-    return 'ttv-deal-map-' + new Date().toISOString().slice(0, 10) + '.' + ext;
+    return 'ttv-deal-map-' + todayIso() + '.' + ext;
   }
   function exportMapCSV(list, unmappedCount) {
     if (!list || !list.length) { toast('No plotted leads to export'); return; }
@@ -2457,7 +2459,7 @@
     const statuses = [...new Set(list.map(l => l.status || 'Unknown'))];
     let kml = '<?xml version="1.0" encoding="UTF-8"?>\n'
       + '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>\n'
-      + '<name>Tide &amp; Timber Deal Map ' + new Date().toISOString().slice(0, 10) + '</name>\n';
+      + '<name>Tide &amp; Timber Deal Map ' + todayIso() + '</name>\n';
     statuses.forEach(st => {
       kml += '<Style id="' + styleId(st) + '"><IconStyle><color>' + kmlColor(STATUS_COLOR[st])
         + '</color><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon></IconStyle></Style>\n';
@@ -2513,7 +2515,7 @@
     'dealOutcome','areaVerdict','decidedBy','decidedOn','participants','recordType'];
 
   function mergeLeadPair(keeper, twin) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIso();
 
     MERGE_FILL_IF_BLANK.forEach(f => {
       const kv = keeper[f];
@@ -2710,7 +2712,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `deal-ledger-leads-${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = `deal-ledger-leads-${todayIso()}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
