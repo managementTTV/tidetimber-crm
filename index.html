@@ -266,7 +266,7 @@
     .dl-row2, .dl-row3 { grid-template-columns: 1fr; }
   }
 
-  /* --- Follow-up queue --- */
+  /* --- Follow-up block (lead detail view) --- */
   .dl-fu-section {
     border: 1px solid var(--line-strong); border-radius: var(--radius);
     background: var(--paper-raised); margin-bottom: 26px; overflow: hidden;
@@ -280,18 +280,11 @@
     font-family: 'Fraunces', serif; font-weight: 600; font-size: 16.5px; margin: 0;
     display: flex; align-items: center; gap: 8px;
   }
-  .dl-fu-head .fu-count {
-    font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600;
-    background: var(--escalate-bg); color: var(--escalate); padding: 2px 8px; border-radius: 10px;
-  }
-  .dl-fu-empty { padding: 22px 16px; text-align: center; color: var(--ink-soft); font-size: 13px; }
-  .dl-fu-list { display: flex; flex-direction: column; }
   .dl-fu-row {
     display: flex; align-items: center; gap: 14px; padding: 12px 16px;
     border-bottom: 1px dashed var(--line);
   }
   .dl-fu-row:last-child { border-bottom: none; }
-  .dl-fu-row.overdue { background: var(--sold-bg); }
   .dl-fu-main { flex: 1; min-width: 0; }
   .dl-fu-addr { font-family: 'Fraunces', serif; font-size: 14.5px; font-weight: 500; margin-bottom: 3px; }
   .dl-fu-sub { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-soft); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -302,7 +295,6 @@
   .badge-followup { background: var(--active-bg); color: var(--active); }
   .badge-rejected { background: var(--sold-bg); color: var(--sold); }
   .badge-ghosted { background: var(--off-bg); color: var(--off); }
-  .dl-fu-overdue-tag { color: var(--sold); font-weight: 600; }
   .dl-fu-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
   .dl-fu-stage-select {
     font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 6px 8px;
@@ -310,7 +302,7 @@
     cursor: pointer; max-width: 150px;
   }
   .dl-btn-sm { font-size: 11.5px; padding: 7px 11px; }
-  /* Editable due date inside the follow-up queue (Pat, Sept 2026). */
+  /* Editable due date (Pat, Sept 2026). */
   .dl-fu-date-wrap {
     display: inline-flex; align-items: center; gap: 5px;
     font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase;
@@ -320,7 +312,6 @@
     font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 5px 7px;
     border: 1px solid var(--line-strong); background: #fff; border-radius: var(--radius); color: var(--ink);
   }
-  .dl-fu-row.overdue .dl-fu-date { border-color: var(--sold); }
 
   /* Copy-address button (Pat request): small inline chip next to any address. */
   .dl-copy-addr {
@@ -431,8 +422,6 @@
       <div class="dl-team-note"><span class="dot"></span> <span id="dl-team-note-text">Shared with your team — everyone sees the same list</span></div>
     </div>
 
-    <div id="dl-fu-section" class="dl-fu-section"></div>
-
     <div id="dl-stats" class="dl-stats"></div>
 
     <div class="dl-toolbar">
@@ -451,9 +440,9 @@
         <option value="all">All records</option>
       </select>
       <select id="dl-sort" class="dl-select">
+        <option value="followup-asc" selected>Follow-up date</option>
         <option value="date-desc">Newest first</option>
         <option value="date-asc">Oldest first</option>
-        <option value="followup-asc">Follow-up date</option>
       </select>
       <div class="dl-map-seg" id="dl-view-toggle">
         <button type="button" data-view="board" title="Kanban board: one column per status. Drag a card to change its status.">Board</button>
@@ -1151,73 +1140,8 @@
     });
   }
 
-  function renderFollowUpQueue() {
-    const fuEl = document.getElementById('dl-fu-section');
-    if (!loaded) { fuEl.innerHTML = ''; return; }
-    const today = new Date().toISOString().slice(0, 10);
-    const due = leads.filter(l => l.followUpDate && l.followUpDate <= today)
-      .sort((a, b) => new Date(a.followUpDate) - new Date(b.followUpDate));
-
-    const head = `<div class="dl-fu-head"><h2>📋 Today's Follow-Ups <span class="fu-count">${due.length}</span></h2></div>`;
-
-    if (due.length === 0) {
-      fuEl.innerHTML = head + `<div class="dl-fu-empty">Nothing due today — you're caught up.</div>`;
-      return;
-    }
-
-    const rows = due.map(l => {
-      const tk = l.followUpTrack || 'followup';
-      const track = TRACKS[tk];
-      const stage = l.followUpStage || 1;
-      const overdue = l.followUpDate < today;
-      return `
-        <div class="dl-fu-row ${overdue ? 'overdue' : ''}" data-id="${l.id}">
-          <div class="dl-fu-main">
-            <div class="dl-fu-addr">${escapeHtml(l.address || 'Untitled lead')}${copyAddrBtn(l.address)}</div>
-            <div class="dl-fu-sub">
-              <span class="dl-fu-badge ${track.badgeClass}">${track.label} · ${stageLabel(tk, stage)}</span>
-              <span>${escapeHtml(l.contactName || 'No contact')}</span>
-              ${overdue ? `<span class="dl-fu-overdue-tag">overdue since ${fmtDate(l.followUpDate)}</span>` : ''}
-            </div>
-          </div>
-          <div class="dl-fu-actions">
-            <label class="dl-fu-date-wrap" title="Next follow-up date \u2014 change it right here">
-              <span>Due</span>
-              <input type="date" class="dl-fu-date" data-action="set-date" data-id="${l.id}" value="${l.followUpDate || ''}" />
-            </label>
-            <select class="dl-fu-stage-select" data-action="set-stage" data-id="${l.id}">
-              ${stageSelectOptionsHtml(l)}
-            </select>
-            <button class="dl-btn dl-btn-ghost dl-btn-sm" data-action="prep-email" data-id="${l.id}">Prep Email</button>
-            <button class="dl-btn dl-btn-brass dl-btn-sm" data-action="mark-done" data-id="${l.id}">✓ Done → Next</button>
-          </div>
-        </div>`;
-    }).join('');
-
-    fuEl.innerHTML = head + `<div class="dl-fu-list">${rows}</div>`;
-
-    fuEl.querySelectorAll('[data-action="prep-email"]').forEach(btn => {
-      btn.addEventListener('click', (e) => { e.stopPropagation(); openEmailModal(btn.dataset.id); });
-    });
-    fuEl.querySelectorAll('[data-action="mark-done"]').forEach(btn => {
-      btn.addEventListener('click', (e) => { e.stopPropagation(); advanceFollowUp(btn.dataset.id); });
-    });
-    fuEl.querySelectorAll('[data-action="set-stage"]').forEach(sel => {
-      sel.addEventListener('click', (e) => e.stopPropagation());
-      sel.addEventListener('change', (e) => {
-        const [tk, stage] = sel.value.split(':');
-        setFollowUpStage(sel.dataset.id, tk, Number(stage));
-      });
-    });
-    // Pat (Sept 2026): the date is visible and editable right in the queue.
-    fuEl.querySelectorAll('[data-action="set-date"]').forEach(inp => {
-      inp.addEventListener('click', (e) => e.stopPropagation());
-      inp.addEventListener('change', () => setFollowUpDate(inp.dataset.id, inp.value));
-    });
-  }
-
-  // Hand-set the next follow-up date without touching track or stage. Moving it
-  // into the future drops the row out of today's queue -- that is the point.
+  // Hand-set the next follow-up date without touching track or stage (lead
+  // detail view).
   async function setFollowUpDate(id, iso) {
     const l = leads.find(x => x.id === id);
     if (!l) return;
@@ -1363,10 +1287,14 @@
     list.sort((a, b) => {
       if (sortV === 'date-asc') return new Date(a.dateAdded||0) - new Date(b.dateAdded||0);
       if (sortV === 'followup-asc') {
-        if (!a.followUpDate && !b.followUpDate) return 0;
-        if (!a.followUpDate) return 1;
-        if (!b.followUpDate) return -1;
-        return new Date(a.followUpDate) - new Date(b.followUpDate);
+        // Overdue first, then soonest. No date goes last. Ties (and the
+        // no-date leads, e.g. Dead / Pass) fall back to newest first.
+        const fa = a.followUpDate || '', fb = b.followUpDate || '';
+        if (fa !== fb) {
+          if (!fa) return 1;
+          if (!fb) return -1;
+          return new Date(fa) - new Date(fb);
+        }
       }
       return new Date(b.dateAdded||0) - new Date(a.dateAdded||0);
     });
@@ -1376,7 +1304,6 @@
 
   function render() {
     renderStats();
-    renderFollowUpQueue();
     if (!loaded) { contentEl.innerHTML = '<div class="dl-loading">Loading leads…</div>'; return; }
 
     const list = getFiltered();
