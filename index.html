@@ -6,7 +6,6 @@
 <title>Deal Ledger — Lead Pipeline</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <style>
   html, body { margin: 0; padding: 0; }
@@ -466,26 +465,44 @@
 <script>
 (function() {
   // ============================================================
-  //  CONFIG — paste your own project values here.
-  //  Supabase: Project Settings → API → Project URL + "anon public" key.
+  //  CONFIG
+  //  Leads and templates live in Supabase, but the page never talks to it
+  //  directly: every read and write goes through the site's own backend
+  //  helper (netlify/functions/ledger.mjs), which holds the secret key.
   //  Google Maps key is OPTIONAL — leave the placeholder and the app still
   //  works; fill it in to auto-geocode addresses for the future map layer.
   // ============================================================
-  const SUPABASE_URL = 'https://jcnicrsdzyrosgldilns.supabase.co';
-  const SUPABASE_ANON_KEY = 'sb_publishable_8WEYiPA8lHudShHJF9IHhA_FtXw350j';
   const GOOGLE_MAPS_API_KEY = 'AIzaSyA8ttzVePEPBJKVBraPac0m6R9gbuOzsNU';   // domain-restricted to the Netlify site
 
-  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  // One call to the backend helper. Waits and retries when the helper's
+  // per-visitor rate limit answers 429 (bulk actions like "Save keys").
+  async function api(method, path, body) {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch('/api/' + path, {
+        method,
+        headers: Object.assign({ 'X-Deal-Ledger': '1' }, body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        body: body === undefined ? undefined : JSON.stringify(body),
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+      if (res.status === 429 && attempt < 8) {
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try { msg = (await res.json()).error || msg; } catch (e) { /* no body */ }
+        throw new Error(msg);
+      }
+      return res.json();
+    }
+  }
 
   // --- Storage: ONE ROW PER LEAD (fixes the old whole-list overwrite bug) ---
   // Each save writes only the lead that changed. lat/lng are also mirrored
   // into real columns so a future map / geospatial query has them ready.
   async function fetchAllLeads() {
-    const { data, error } = await sb
-      .from('leads')
-      .select('id, data')
-      .order('created_at', { ascending: true });
-    if (error) throw error;
+    const data = await api('GET', 'leads');
     // The row id is the source of truth. Imported rows may not carry it inside
     // the JSON blob, so mirror it in or they can't be opened, edited or deleted.
     return (data || []).map(r => Object.assign({}, r.data, {
@@ -494,31 +511,40 @@
   }
 
   async function upsertLead(lead) {
-    const { error } = await sb.from('leads').upsert(
-      { id: lead.id, data: lead, lat: lead.lat ?? null, lng: lead.lng ?? null },
-      { onConflict: 'id' }
-    );
-    if (error) console.error('upsertLead failed', error);
-    return !error;
+    try {
+      await api('PUT', 'leads/' + encodeURIComponent(lead.id),
+        { data: lead, lat: lead.lat ?? null, lng: lead.lng ?? null });
+      return true;
+    } catch (e) {
+      console.error('upsertLead failed', e);
+      return false;
+    }
   }
 
   async function deleteLeadRow(id) {
-    const { error } = await sb.from('leads').delete().eq('id', id);
-    if (error) console.error('deleteLeadRow failed', error);
-    return !error;
+    try {
+      await api('DELETE', 'leads/' + encodeURIComponent(id));
+      return true;
+    } catch (e) {
+      console.error('deleteLeadRow failed', e);
+      return false;
+    }
   }
 
   // --- Settings (email-template overrides) — single shared row ---
   async function settingsGet(key) {
-    const { data, error } = await sb.from('settings').select('data').eq('key', key).maybeSingle();
-    if (error) throw error;
-    return data ? data.data : null;
+    const res = await api('GET', 'settings/' + encodeURIComponent(key));
+    return res ? res.data : null;
   }
 
   async function settingsSet(key, value) {
-    const { error } = await sb.from('settings').upsert({ key, data: value }, { onConflict: 'key' });
-    if (error) console.error('settingsSet failed', error);
-    return !error;
+    try {
+      await api('PUT', 'settings/' + encodeURIComponent(key), { data: value });
+      return true;
+    } catch (e) {
+      console.error('settingsSet failed', e);
+      return false;
+    }
   }
   // --- end storage layer ---
 
@@ -556,6 +582,7 @@
   const STORAGE_KEY = 'crm-leads';
   let leads = [];
   let loaded = false;
+  let loadError = '';   // set when the leads couldn't be fetched, so an outage never looks like an empty pipeline
 
   // Board (Kanban) or grid. Board is the default (Pat, Oct 2026); the choice
   // is remembered per browser.
@@ -1216,8 +1243,11 @@
     try {
       const result = await fetchAllLeads();
       leads = result || [];
+      loadError = '';
     } catch (e) {
+      console.error('loadLeads failed', e);
       leads = [];
+      loadError = (e && e.message) || 'unknown error';
     }
     leads = (leads || []).map(l => {
       const x = {
@@ -1314,6 +1344,11 @@
     if (!loaded) { contentEl.innerHTML = '<div class="dl-loading">Loading leads…</div>'; return; }
 
     const list = getFiltered();
+
+    if (loadError) {
+      contentEl.innerHTML = `<div class="dl-empty"><h3>Couldn't load the leads</h3><p>Nothing is lost. Refresh the page in a minute; if it keeps happening, tell Brian (${escapeHtml(loadError)}).</p></div>`;
+      return;
+    }
 
     if (leads.length === 0) {
       contentEl.innerHTML = `<div class="dl-empty"><h3>No leads yet</h3><p>Add your first lead to get the pipeline going.</p></div>`;
