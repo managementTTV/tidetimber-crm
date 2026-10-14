@@ -12,6 +12,8 @@
 //  a same-site check and a per-visitor rate limit.
 // ============================================================
 
+import { geocode } from '../lib/geocode.mjs';
+
 const SUPABASE_URL = 'https://jcnicrsdzyrosgldilns.supabase.co';
 const SITE_ORIGIN = /^https:\/\/(?:[a-z0-9-]+--)?tidetimber-crm\.netlify\.app$/;
 const DEV_ORIGIN = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/;
@@ -20,7 +22,7 @@ const MAX_BODY_BYTES = 200000;
 const PAGE = 1000;
 
 export const config = {
-  path: ['/api/leads', '/api/leads/*', '/api/settings/*'],
+  path: ['/api/leads', '/api/leads/*', '/api/settings/*', '/api/geocode'],
   rateLimit: { windowLimit: 180, windowSize: 60, aggregateBy: ['ip', 'domain'] },
 };
 
@@ -88,7 +90,15 @@ async function route(req) {
     return json(502, { error: 'Database error (' + res.status + ')' });
   };
 
-  const parts = new URL(req.url).pathname.replace(/^\/api\//, '').split('/');
+  // ---- Map pins from free public address data (never Google) ----
+  const url = new URL(req.url);
+  if (url.pathname === '/api/geocode') {
+    if (req.method !== 'GET') return json(405, { error: 'Method not allowed' });
+    const q = (url.searchParams.get('q') || '').slice(0, 300);
+    return json(200, (q && await geocode(q)) || { lat: null, lng: null, source: null });
+  }
+
+  const parts = url.pathname.replace(/^\/api\//, '').split('/');
   const [kind, rawId, ...extra] = parts;
   if (extra.length) return json(404, { error: 'Not found' });
   let id = null;
