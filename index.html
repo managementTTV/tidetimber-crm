@@ -451,7 +451,7 @@
       <button class="dl-select" id="dl-export-btn" style="cursor:pointer;">⬇ Export CSV</button>
       <button class="dl-select" id="dl-dashboard-btn" style="cursor:pointer;">📊 Dashboard</button>
       <button class="dl-select" id="dl-map-btn" style="cursor:pointer;">🗺 Map</button>
-      <button class="dl-select" id="dl-geocode-btn" style="cursor:pointer;">📍 Geocode missing</button>
+      <button class="dl-select" id="dl-geocode-btn" style="cursor:pointer;">📍 Fix map pins</button>
       <button class="dl-select" id="dl-dupes-btn" style="cursor:pointer;">⚠ Duplicates</button>
       <button class="dl-new-btn" id="dl-new-btn">+ New Lead</button>
     </div>
@@ -548,35 +548,31 @@
   }
   // --- end storage layer ---
 
-  // --- Geocoding (map groundwork) ---
-  // Best-effort: if a Google Maps key is set, we turn each lead's address into
-  // lat/lng on save so the future map can drop a pin. No key (or a failed
-  // lookup) just means the lead saves without coordinates — backfill later.
+  // --- Map pins ---
+  // Pins come from free public address data (NC 911 address points, Census as
+  // the backup) through the backend helper -- never from Google's geocoder,
+  // because Google's terms don't allow keeping its coordinates. Google Maps is
+  // still used to SHOW the map. A failed lookup just means no pin.
   let mapsReady = false;
-  let geocoder = null;
   function initMaps() {
     if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY.indexOf('YOUR-') === 0) return;
     window.__dlMapsReady = function () {
-      try { geocoder = new google.maps.Geocoder(); mapsReady = true; }
-      catch (e) { mapsReady = false; }
+      mapsReady = !!(window.google && google.maps);
     };
     const s = document.createElement('script');
     s.src = 'https://maps.googleapis.com/maps/api/js?key=' + GOOGLE_MAPS_API_KEY + '&libraries=visualization&callback=__dlMapsReady&loading=async';
     s.async = true;
     document.head.appendChild(s);
   }
-  function geocodeAddress(address) {
-    return new Promise(function (resolve) {
-      if (!mapsReady || !geocoder || !address) return resolve(null);
-      geocoder.geocode({ address: address }, function (results, status) {
-        if (status === 'OK' && results && results[0]) {
-          const loc = results[0].geometry.location;
-          resolve({ lat: loc.lat(), lng: loc.lng() });
-        } else {
-          resolve(null);
-        }
-      });
-    });
+  async function geocodeAddress(address) {
+    if (!address) return null;
+    const g = await api('GET', 'geocode?q=' + encodeURIComponent(address));
+    return (g && typeof g.lat === 'number' && typeof g.lng === 'number') ? g : null;
+  }
+
+  // A pin we may keep: it came from the free address data, not Google.
+  function hasOwnPin(l) {
+    return !!l.geoSource && typeof l.lat === 'number' && !isNaN(l.lat);
   }
 
   const STORAGE_KEY = 'crm-leads';
@@ -1978,6 +1974,7 @@
         dealReasons: dealReasons,
         lat: (l.lat != null ? l.lat : null),
         lng: (l.lng != null ? l.lng : null),
+        geoSource: l.geoSource || '',
       };
 
       // The form only rebuilds the fields it shows. Carry over everything else
@@ -2000,14 +1997,16 @@
       closeOverlay();
       render();
 
-      // Map groundwork: geocode the address to lat/lng (only when it's new or
-      // changed, to avoid needless lookups). Best-effort — never blocks a save.
+      // Map pin: look the address up when it's new or changed, or when the lead
+      // has no pin from the free address data yet. No match clears the old pin
+      // so a moved address never keeps a stale (or Google) one. Never blocks a save.
       const addrChanged = !isEdit || (l.address !== updated.address);
-      if (updated.address && (addrChanged || updated.lat == null)) {
+      if (updated.address && (addrChanged || !hasOwnPin(updated))) {
         try {
           const geo = await geocodeAddress(updated.address);
-          if (geo) { updated.lat = geo.lat; updated.lng = geo.lng; }
-        } catch (e) { /* ignore — save proceeds without coordinates */ }
+          if (geo) { updated.lat = geo.lat; updated.lng = geo.lng; updated.geoSource = geo.source; }
+          else { updated.lat = null; updated.lng = null; updated.geoSource = ''; }
+        } catch (e) { /* lookup failed -- save proceeds, the pin is fixed on a later save */ }
       }
 
       const ok = await upsertLead(updated);
@@ -2023,14 +2022,15 @@
   document.getElementById('dl-geocode-btn').addEventListener('click', backfillGeocodes);
   document.getElementById('dl-dupes-btn').addEventListener('click', openDupesModal);
 
-  // Repeatable backfill: fills lat/lng for any lead that has an address but no
-  // coordinates. Runs in the page so it uses the referrer-locked Maps key.
-  // Safe to re-run -- it skips anything already geocoded.
+  // Repeatable re-pin: looks up every lead whose pin didn't come from the free
+  // address data (missing, or an old Google one) and replaces it. Leads that
+  // can't be matched lose the old pin. Safe to re-run -- it skips good pins.
   async function backfillGeocodes() {
-    if (!mapsReady) { toast('Maps not loaded yet -- give it a second and retry'); return; }
-    const todo = leads.filter(l => l.address && !(typeof l.lat === 'number' && !isNaN(l.lat)));
-    if (!todo.length) { toast('Everything with an address already has coordinates'); return; }
-    if (!confirm('Look up coordinates for ' + todo.length + ' lead(s)?')) return;
+    const todo = leads.filter(l => l.address && !hasOwnPin(l));
+    const stale = leads.filter(l => !l.address && typeof l.lat === 'number');
+    for (const l of stale) { l.lat = null; l.lng = null; l.geoSource = ''; await upsertLead(l); }
+    if (!todo.length) { toast('Every lead with an address already has a county pin'); return; }
+    if (!confirm('Re-pin ' + todo.length + ' lead(s) from free county address data? Leads that can\'t be matched lose their old pin.')) return;
     const btn = document.getElementById('dl-geocode-btn');
     const label = btn.textContent;
     btn.disabled = true;
@@ -2038,14 +2038,13 @@
     const misses = [];
     for (const l of todo) {
       btn.textContent = 'Geocoding ' + (done + missed + 1) + '/' + todo.length;
-      // Most imported addresses are street-only. Bias to NC so a bare street
-      // name doesn't match an identically-named road in another state.
-      const q = /\b(NC|SC|North Carolina|South Carolina)\b/i.test(l.address)
-        ? l.address : (l.address + ', NC');
+      // Street-only (imported) addresses are matched inside Pat's buy-box
+      // counties by the helper; ambiguous ones get no pin rather than a guess.
       try {
-        const geo = await geocodeAddress(q);
-        if (geo) { l.lat = geo.lat; l.lng = geo.lng; await upsertLead(l); done++; }
-        else { missed++; misses.push(l.address); }
+        const geo = await geocodeAddress(l.address);
+        if (geo) { l.lat = geo.lat; l.lng = geo.lng; l.geoSource = geo.source; done++; }
+        else { l.lat = null; l.lng = null; l.geoSource = ''; missed++; misses.push(l.address); }
+        await upsertLead(l);
       } catch (e) { missed++; misses.push(l.address); }
       await new Promise(r => setTimeout(r, 120));
     }
@@ -2053,7 +2052,7 @@
     btn.textContent = label;
     render();
     if (misses.length) console.log('Could not geocode:', misses);
-    toast('Geocoded ' + done + (missed ? ' -- ' + missed + ' failed (see console)' : ''));
+    toast('Pinned ' + done + (missed ? ' -- ' + missed + ' could not be matched (see console)' : ''));
   }
 
   function dowOf(iso) { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)).getUTCDay(); }
