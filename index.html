@@ -1977,6 +1977,11 @@
         geoSource: l.geoSource || '',
       };
 
+      // The form only rebuilds the fields it shows. Carry over everything else
+      // the lead already holds (imported decidedOn / decidedBy / participants /
+      // recordType, and any field added later) so an edit never drops data.
+      for (const k of Object.keys(l)) if (!Object.hasOwn(updated, k)) updated[k] = l[k];
+
       // Same rules on the way to the database, so a status set anywhere other
       // than this form (import, bulk edit, future automation) is treated
       // identically. Skipped when the status did not change, so hand-edited
